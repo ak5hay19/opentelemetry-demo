@@ -187,14 +187,114 @@ def test_a_missing_file_fails_safely_and_creates_nothing(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_a_toggle_with_a_targeting_rule_is_refused(flag_file):
+CONDITION = {"==": [{"var": "product_id"}, "OLJCESPC7Z"]}
+
+
+def with_rule(path, name="productCatalogFailure", rule=None, variants=None):
+    data = load(path)
+    data["flags"][name]["targeting"] = rule
+    if variants is not None:
+        data["flags"][name]["variants"] = variants
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    return data
+
+
+def test_the_accepted_targeting_shape_is_reset_to_both_branches_off_with_the_condition_unchanged(flag_file):
+    before = with_rule(flag_file, rule={"if": [CONDITION, "on", "off"]})
+    flag_adapter.set_resting(["productCatalogFailure"], flag_file)
+    expected = copy.deepcopy(before)
+    expected["flags"]["productCatalogFailure"]["defaultVariant"] = "off"
+    expected["flags"]["productCatalogFailure"]["targeting"] = {"if": [CONDITION, "off", "off"]}
+    assert load(flag_file) == expected
+
+
+@pytest.mark.parametrize("branches", [["on", "off"], ["off", "off"], ["off", "on"], ["on", "on"], ["mid", "mid"]])
+def test_every_branch_combination_of_the_accepted_shape_ends_up_both_off(flag_file, branches):
+    with_rule(flag_file, rule={"if": [CONDITION, *branches]}, variants={"on": True, "off": False, "mid": 1})
+    flag_adapter.set_resting(["productCatalogFailure"], flag_file)
+    flag = load(flag_file)["flags"]["productCatalogFailure"]
+    assert flag["targeting"] == {"if": [CONDITION, "off", "off"]} and flag["defaultVariant"] == "off"
+    flag_adapter.set_resting(["productCatalogFailure"], flag_file)
+    assert load(flag_file)["flags"]["productCatalogFailure"] == flag
+
+
+@pytest.mark.parametrize("targeting", [{}, None])
+def test_flags_without_targeting_behave_as_before(flag_file, targeting):
+    with_rule(flag_file, name="cartFailure", rule=targeting)
+    flag_adapter.set_resting(["cartFailure"], flag_file)
+    flag = load(flag_file)["flags"]["cartFailure"]
+    assert flag["defaultVariant"] == "off" and flag["targeting"] == targeting
+
+
+BAD_RULES = {
+    "extra key": {"if": [CONDITION, "on", "off"], "else": 1},
+    "other operator": {"==": [1, 1]},
+    "nested if": {"if": [CONDITION, {"if": [CONDITION, "on", "off"]}, "off"]},
+    "non-string branch": {"if": [CONDITION, True, "off"]},
+    "null branch": {"if": [CONDITION, "on", None]},
+    "branch not a variant": {"if": [CONDITION, "on", "missing"]},
+    "first branch not a variant": {"if": [CONDITION, "missing", "off"]},
+    "too short": {"if": [CONDITION, "on"]},
+    "too long": {"if": [CONDITION, "on", "off", "off"]},
+    "condition only": {"if": [CONDITION]},
+    "if not a list": {"if": "on"},
+    "else-if chain": {"if": [CONDITION, "on", CONDITION, "off", "off"]},
+    "list": [{"if": [CONDITION, "on", "off"]}],
+    "empty list": [],
+    "string": "on",
+    "false": False,
+}
+
+
+@pytest.mark.parametrize("shape", sorted(BAD_RULES))
+def test_every_other_targeting_shape_is_refused_with_nothing_written(flag_file, shape):
+    with_rule(flag_file, rule=BAD_RULES[shape])
+    before = flag_file.read_bytes()
+    with pytest.raises(flag_adapter.FlagAdapterError, match="targeting rule"):
+        flag_adapter.set_resting(["productCatalogFailure"], flag_file)
+    assert flag_file.read_bytes() == before and [p.name for p in flag_file.parent.iterdir()] == [flag_file.name]
+    with pytest.raises(flag_adapter.FlagAdapterError):
+        flag_adapter.check(["productCatalogFailure"], flag_file)
+
+
+@pytest.mark.parametrize("shape", sorted(BAD_RULES))
+def test_a_bad_shape_stops_a_mixed_list_completely(flag_file, shape):
+    with_rule(flag_file, rule=BAD_RULES[shape])
+    before = flag_file.read_bytes()
+    with pytest.raises(flag_adapter.FlagAdapterError):
+        flag_adapter.set_resting(["cartFailure", "productCatalogFailure", "adFailure"], flag_file)
+    assert flag_file.read_bytes() == before
+
+
+def test_a_mixed_list_of_plain_and_targeted_flags_is_applied_together(flag_file):
+    before = with_rule(flag_file, rule={"if": [CONDITION, "on", "off"]})
+    names = ["cartFailure", "productCatalogFailure", "productCatalogLockContention"]
+    assert flag_adapter.set_resting(names, flag_file) == names
+    flags = load(flag_file)["flags"]
+    expected = copy.deepcopy(before)
+    for name in names:
+        expected["flags"][name]["defaultVariant"] = "off"
+    expected["flags"]["productCatalogFailure"]["targeting"] = {"if": [CONDITION, "off", "off"]}
+    assert load(flag_file) == expected and flags["adFailure"]["defaultVariant"] == "on"
+
+
+def test_a_mixed_list_where_a_plain_flag_is_bad_changes_the_targeted_flag_not_at_all(flag_file):
+    with_rule(flag_file, rule={"if": [CONDITION, "on", "off"]})
     data = load(flag_file)
-    data["flags"]["cartFailure"]["targeting"] = {"if": [{"==": [1, 1]}, "on", "off"]}
+    del data["flags"]["cartFailure"]["variants"]["off"]
     flag_file.write_text(json.dumps(data))
     before = flag_file.read_bytes()
-    with pytest.raises(flag_adapter.FlagAdapterError, match="targeting"):
-        flag_adapter.set_resting(["cartFailure"], flag_file)
+    with pytest.raises(flag_adapter.FlagAdapterError, match="cartFailure"):
+        flag_adapter.set_resting(["productCatalogFailure", "cartFailure"], flag_file)
     assert flag_file.read_bytes() == before
+
+
+def test_the_targeted_reset_returns_only_names_and_is_dry_run_checkable(flag_file):
+    with_rule(flag_file, rule={"if": [CONDITION, "on", "off"]})
+    before = flag_file.read_bytes()
+    flag_adapter.check(["productCatalogFailure"], flag_file)
+    assert flag_file.read_bytes() == before
+    assert flag_adapter.set_resting(["productCatalogFailure"], flag_file) == ["productCatalogFailure"]
 
 
 def test_the_write_is_atomic_and_leaves_no_temp_file(flag_file, monkeypatch):

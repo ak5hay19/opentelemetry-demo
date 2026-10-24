@@ -3,6 +3,9 @@
 set_resting puts catalogued toggles back on their resting variant. It never turns anything on, never touches
 other flags or keys, and never returns or logs what a toggle was set to before. Any problem raises
 FlagAdapterError before anything is written.
+
+A toggle may carry one targeting shape, {"if": [condition, A, B]} with A and B variant names. Its resting state
+is defaultVariant, A and B all on the resting variant; the condition is left as it is.
 """
 import json
 import os
@@ -46,6 +49,17 @@ def _check_names(names) -> list[str]:
     return list(dict.fromkeys(names))
 
 
+def _rule(name: str, flag: dict) -> list | None:
+    """The [condition, A, B] list of the one accepted targeting shape, or None when the toggle has no targeting."""
+    targeting = flag.get("targeting")
+    if targeting is None or targeting == {}:
+        return None
+    rule = targeting.get("if") if isinstance(targeting, dict) and list(targeting) == ["if"] else None
+    if (isinstance(rule, list) and len(rule) == 3 and all(isinstance(b, str) and b in flag["variants"] for b in rule[1:])):
+        return rule
+    raise FlagAdapterError(f"toggle {name} has a targeting rule of a shape that is not handled; nothing was changed")
+
+
 def _check_document(document: dict, names: list[str]) -> None:
     for name in names:
         flag = document["flags"].get(name)
@@ -54,9 +68,7 @@ def _check_document(document: dict, names: list[str]) -> None:
         variants = flag.get("variants")
         if not isinstance(variants, dict) or RESTING_VARIANT not in variants:
             raise FlagAdapterError(f"toggle {name} has no {RESTING_VARIANT!r} variant; nothing was changed")
-        if flag.get("targeting"):
-            raise FlagAdapterError(f"toggle {name} has a targeting rule, so its default variant is not the switch; "
-                                   "nothing was changed")
+        _rule(name, flag)
 
 
 def check(names, path=None) -> None:
@@ -84,7 +96,11 @@ def set_resting(names, path=None) -> list[str]:
     document = _load(path)
     _check_document(document, names)
     for name in names:
-        document["flags"][name]["defaultVariant"] = RESTING_VARIANT
+        flag = document["flags"][name]
+        flag["defaultVariant"] = RESTING_VARIANT
+        rule = _rule(name, flag)
+        if rule:
+            rule[1] = rule[2] = RESTING_VARIANT
     try:
         _write_atomically(path, document)
     except OSError as exc:
