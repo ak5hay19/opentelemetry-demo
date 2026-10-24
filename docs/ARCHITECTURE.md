@@ -54,7 +54,7 @@ Solid green = built and tested. Dashed grey = planned (P6 and Day 2), not in the
 | Loop | `oncall/loop.py` | The tool-calling loop and its budgets. |
 | LLM adapter | `oncall/llm.py` | One interface over the Anthropic SDK (or any OpenAI-compatible one). Reports token usage. |
 | Prompt | `oncall/prompts.py` | Generic on-call guidance. No faults, flags or service behaviours. |
-| CLI | `oncall/investigate.py` | `python -m oncall.investigate [--summary]` |
+| CLI | `oncall/investigate.py` | `python -m oncall.investigate [--summary]`; after saving the run it calls `finalize` to write `report.json` and `report.md` into the run folder, and `investigate(symptom)` returns the report dict. |
 | Fault injector | `dev/faultctl/` | Creates practice incidents and logs ground truth. Separate package, never imported by `oncall/` or `tools/`. |
 
 ## The tools
@@ -87,6 +87,16 @@ Solid green = built and tested. Dashed grey = planned (P6 and Day 2), not in the
 | Validator: every cited ID must exist and every quote must match the ledger exactly. | Planned (P6) |
 | Confidence caps and escalation to a human below a threshold. | Planned (P6) |
 | Action API, dry run, kill switch and human approval before any change. | Planned (Day 2) |
+
+## Hands
+
+- Flow (`python -m actions.run_incident --alert TEXT`): investigate, propose one action, show it and ask a human, execute, verify, write `incident_report.md/json` into the run folder. `detector/detect.py` watches the shop and starts this flow with a generic alert text.
+- Allowlist: one action, `restart_container` (`docker start` for a stopped container, `docker restart` otherwise). The command is built from the container's current state and re-checked just before it runs. The deny list is the monitoring stack (`jaeger`, `prometheus`, `opensearch`, `otel-collector`, `grafana`, `kafka`, `frontend-proxy`) plus the flag service containers, which are refused by the sanitiser.
+- Dry run is the default: an approved action only changes something when `--execute` is given. Only an explicit "y" or "yes" approves; no terminal, EOF or any other answer is a denial. One action per incident.
+- Kill switch: the file `reports/actions/KILL` (`python -m actions.kill on|off|status`). While it exists nothing is approved or executed, and it is checked again right before the command.
+- Audit log: `reports/actions/audit.jsonl`, append-only, one JSON line per approval, dry run, execution and kill switch change.
+- Verification is read-only: the container must be running and healthy; metrics (the load generator ignored) then decide `recovered` or `recovered_unverified_metrics`. A container that never becomes healthy is `not_recovered`, and a restart has nothing to roll back, so that case goes to a human.
+- Not in v1: toggling a feature flag, Kubernetes scaling, load-generator throttling, automatic rollback.
 
 ## Known limits
 

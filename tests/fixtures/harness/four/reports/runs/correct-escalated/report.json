@@ -1,0 +1,13 @@
+{
+  "status": "escalated",
+  "confidence": 0.4,
+  "evidence": [
+    {
+      "validated": true
+    },
+    {
+      "validated": false
+    }
+  ],
+  "escalation_reason": "evidence did not validate"
+}
