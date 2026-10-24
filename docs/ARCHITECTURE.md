@@ -54,7 +54,7 @@ Solid green = built and tested. Dashed grey = planned (P6 and Day 2), not in the
 | Loop | `oncall/loop.py` | The tool-calling loop and its budgets. |
 | LLM adapter | `oncall/llm.py` | One interface over the Anthropic SDK (or any OpenAI-compatible one). Reports token usage. |
 | Prompt | `oncall/prompts.py` | Generic on-call guidance. No faults, flags or service behaviours. |
-| CLI | `oncall/investigate.py` | `python -m oncall.investigate [--summary]` |
+| CLI | `oncall/investigate.py` | `python -m oncall.investigate [--summary]`; after saving the run it calls `finalize` to write `report.json` and `report.md` into the run folder, and `investigate(symptom)` returns the report dict. |
 | Fault injector | `dev/faultctl/` | Creates practice incidents and logs ground truth. Separate package, never imported by `oncall/` or `tools/`. |
 
 ## The tools

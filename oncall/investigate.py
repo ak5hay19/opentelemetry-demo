@@ -4,7 +4,8 @@
 
 Prints the steps the agent took, the diagnosis candidate (NOT validated yet) and the tokens used,
 and saves ledger.json, candidate.json and run_info.json (plus rejected_submissions.json when the
-model's final answer was rejected) to reports/runs/<run id>/.
+model's final answer was rejected) to reports/runs/<run id>/. It then validates the candidate and writes
+report.json and report.md next to them (see oncall/report.py), and ends with a REPORT section.
 --summary also prints a symptom summary built from the ledger: it lists what the tools showed and
 cites ledger ids, and it does not say what the cause is.
 Needs the demo running and a key in .env.incident (see `python -m oncall.llm --check`).
@@ -17,7 +18,9 @@ from pathlib import Path
 from oncall import toolbox
 from oncall.llm import LLMNotConfigured, make_llm
 from oncall.loop import LoopConfig, RunResult, run_investigation
+from oncall import schema as S
 from oncall.prompts import DEFAULT_SYMPTOM
+from oncall.report import finalize
 from tools.ledger import Ledger
 
 RUNS_DIR = Path(__file__).resolve().parent.parent / "reports" / "runs"
@@ -147,6 +150,59 @@ def save_run(result: RunResult, runs_dir: Path = RUNS_DIR) -> Path:
     return folder
 
 
+def failed_report(result: RunResult, reason: str) -> dict:
+    """The escalated stand-in returned when finalize raised, so callers always get a report dict."""
+    info = result.run_info
+    report = {name: None for name in S.REPORT_FIELDS}
+    report.update({
+        S.INCIDENT_ID: info["incident_id"], S.STARTED_AT: info["started_at"], S.TRIGGER: info["trigger"],
+        S.STATUS: S.STATUS_ESCALATED, S.COMPONENT: result.candidate[S.COMPONENT], S.CAUSE: result.candidate[S.CAUSE],
+        S.CONFIDENCE: 0.0, S.STATED_CONFIDENCE: result.candidate[S.STATED_CONFIDENCE], S.CONFIDENCE_REASONS: [],
+        S.EVIDENCE: [], S.ALTERNATIVES: [], S.STEPS: [], S.LIMITATIONS: [reason], S.ESCALATION_REASON: reason,
+        S.WARNINGS: [],
+    })
+    return report
+
+
+def investigate(symptom: str = DEFAULT_SYMPTOM, llm=None, config: LoopConfig | None = None,
+                runs_dir: Path = RUNS_DIR, details: dict | None = None) -> dict:
+    """Investigate `symptom`, save the run and return the final report dict (status diagnosed or escalated).
+
+    A failure to build the report is printed as one line and never loses the saved run files; the returned
+    report is then an escalated stand-in. `details`, when given, is filled with the RunResult ("result"), the
+    run folder ("folder") and the error text ("report_error", None when the report was written)."""
+    llm = llm if llm is not None else make_llm()
+    result = run_investigation(llm, symptom, config or LoopConfig())
+    folder = save_run(result, runs_dir)
+    report_error = None
+    try:
+        report = finalize(result.candidate, result.ledger, result.run_info, folder)
+    except Exception as exc:
+        report_error = f"{type(exc).__name__}: {exc}"
+        print(f"report failed: {report_error} (ledger.json, candidate.json and run_info.json were kept)", file=sys.stderr)
+        report = failed_report(result, f"the report could not be written ({report_error})")
+    if details is not None:
+        details.update(result=result, folder=folder, report_error=report_error)
+    return report
+
+
+def print_report(report: dict, folder: Path, report_error: str | None) -> None:
+    print("\nREPORT")
+    print(f"  status: {report[S.STATUS]}")
+    print(f"  component: {report[S.COMPONENT]}")
+    print(f"  confidence: {report[S.CONFIDENCE]:.2f} (stated {report[S.STATED_CONFIDENCE]})")
+    for reason in report[S.CONFIDENCE_REASONS]:
+        print(f"    - {reason}")
+    if report[S.ESCALATION_REASON]:
+        print(f"  escalation reason: {report[S.ESCALATION_REASON]}")
+    evidence = report[S.EVIDENCE]
+    print(f"  evidence validated {sum(1 for e in evidence if e[S.EV_VALIDATED])}/{len(evidence)}")
+    if report_error:
+        print(f"  report files not written: {report_error}")
+    else:
+        print(f"  report: {folder / S.REPORT_MD_FILE}")
+
+
 def main(argv: list[str] | None = None, llm=None, runs_dir: Path = RUNS_DIR) -> int:
     parser = argparse.ArgumentParser(description="Investigate the running application with an LLM and read-only tools")
     parser.add_argument("--symptom", default=DEFAULT_SYMPTOM, help="the problem report the agent starts from")
@@ -163,8 +219,9 @@ def main(argv: list[str] | None = None, llm=None, runs_dir: Path = RUNS_DIR) -> 
             print(f"cannot start: {exc}", file=sys.stderr)
             return 2
     config = LoopConfig(token_budget=args.token_budget, step_budget=args.steps)
-    result = run_investigation(llm, args.symptom, config)
-    folder = save_run(result, runs_dir)
+    details: dict = {}
+    report = investigate(args.symptom, llm, config, runs_dir, details)
+    result, folder = details["result"], details["folder"]
 
     info = result.run_info
     print(f"RUN {info['incident_id']}  started {info['started_at']}")
@@ -181,6 +238,7 @@ def main(argv: list[str] | None = None, llm=None, runs_dir: Path = RUNS_DIR) -> 
     if result.rejected:
         print(f"rejected submissions: {len(result.rejected)} (see rejected_submissions.json)")
     print(f"saved to {folder}")
+    print_report(report, folder, details["report_error"])
     return 0
 
 
