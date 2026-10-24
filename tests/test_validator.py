@@ -267,3 +267,120 @@ def test_every_fixture_loads_and_can_be_validated(name):
     led = ledger(name)
     assert led and all("result" in e for e in led.values())
     assert validate_evidence(candidate(item("C1", "container", "zz-not-there")), led).items[0][S.EV_VALIDATED] is False
+
+
+# --- key/value quotes copied from the compact view -------------------------------------------------
+
+def tool_entry(entry_id, tool, items, extra=None):
+    result = {"tool": tool, "state": "data", "query": ["a query"], "window": {"minutes": 5}, "items": items,
+              "total_items": len(items), "extra": extra or {}, "notes": [], "error": None}
+    return {"id": entry_id, "tool": tool, "arguments": {}, "result": result}
+
+
+def keyed_ledger():
+    return load_ledger([
+        tool_entry("M1", "query_metrics", [
+            {"service": "cart", "p95_ms": 15000.0, "error_rate_pct": 3.38},
+            {"service": "frontend", "p95_ms": 120.5, "error_rate_pct": 0.0}]),
+        tool_entry("M2", "query_metrics", [{"service": "checkout", "p95_ms": 10250.0}]),
+        tool_entry("C1", "container_health", [
+            {"name": "valkey-cart", "status": "exited", "health": "unhealthy", "restart_count": 2,
+             "exit_code": 137, "oom_killed": True}],
+            {"summary": {"total": 1, "running": 0}}),
+    ])
+
+
+def ok(ledger_id, kind, quote, value=None, led=None):
+    return validate_evidence(candidate(item(ledger_id, kind, quote, value)), led or keyed_ledger()).items[0]
+
+
+@pytest.mark.parametrize("ledger_id,kind,quote", [
+    ("M1", "metric", '"p95_ms":15000.0'),
+    ("M1", "metric", 'p95_ms":15000.0'),
+    ("M1", "metric", '"p95_ms": 15000.0'),
+    ("M1", "metric", '"p95_ms" : 15000.0,'),
+    ("M1", "metric", "p95_ms 15000"),
+    ("M1", "metric", "p95_ms: 15000.0"),
+    ("M1", "metric", '"p95_ms":15100.0'),
+    ("M1", "metric", '"error_rate_pct":0.0'),
+    ("M1", "metric", '"service":"cart"'),
+    ("M2", "metric", 'p95_ms":10250.0'),
+    ("C1", "container", '"oom_killed":true'),
+    ("C1", "container", 'oom_killed":true'),
+    ("C1", "container", "oom_killed true"),
+    ("C1", "container", "oom_killed True"),
+    ("C1", "container", '"status":"exited"'),
+    ("C1", "container", "status exited"),
+    ("C1", "container", '"exit_code":137'),
+])
+def test_key_value_quote_from_the_compact_view_is_valid(ledger_id, kind, quote):
+    assert ok(ledger_id, kind, quote)[S.EV_VALIDATED] is True, quote
+
+
+@pytest.mark.parametrize("quote", ['oom_killed":true', "oom_killed true", '"oom_killed":true'])
+def test_key_value_shape_is_valid_as_the_value_field(quote):
+    out = ok("C1", "container", "valkey-cart", value=quote)
+    assert out[S.EV_VALIDATED] is True, out[S.EV_NOTE]
+    assert ok("M1", "metric", "15000.0", value='"p95_ms":15000.0')[S.EV_VALIDATED] is True
+
+
+@pytest.mark.parametrize("ledger_id,kind,quote", [
+    ("M1", "metric", '"latency_ms":15000.0'),  # key not in the entry
+    ("M1", "metric", '"p95_ms":900.0'),  # wrong value
+    ("M1", "metric", '"p95_ms":16000.0'),  # number outside the tolerance
+    ("M1", "metric", '"p95_ms":150'),  # a prefix of the real digits
+    ("M1", "metric", '"p95_ms":10250.0'),  # taken from M2
+    ("M1", "metric", '"service":"checkout"'),  # taken from M2
+    ("M1", "metric", '"error_rate_pct":3.5'),
+    ("M1", "metric", '"p95_ms":true'),
+    ("C1", "container", "oom_killed false"),  # boolean mismatch
+    ("C1", "container", '"oom_killed":false'),
+    ("C1", "container", '"oom_killed":1'),  # a number is not a boolean
+    ("C1", "container", '"exit_code":0'),
+    ("C1", "container", '"exit_code":true'),
+    ("C1", "container", "status running"),
+    ("C1", "container", '"health":"healthy"'),
+])
+def test_key_value_quote_that_is_wrong_is_rejected(ledger_id, kind, quote):
+    assert ok(ledger_id, kind, quote)[S.EV_VALIDATED] is False, quote
+
+
+def test_key_value_quote_is_rejected_when_the_value_belongs_to_another_entry():
+    out = ok("M2", "metric", '"p95_ms":15000.0')
+    assert out[S.EV_VALIDATED] is False
+    assert "never with the value" in out[S.EV_NOTE]
+
+
+def test_key_value_value_field_rejects_wrong_and_foreign_values():
+    for wrong in ("oom_killed false", '"p95_ms":15000.0', '"restart_count":9', "nonexistent_key true"):
+        assert ok("C1", "container", "valkey-cart", value=wrong)[S.EV_VALIDATED] is False, wrong
+
+
+def test_key_value_check_only_sees_what_the_view_shows():
+    led = load_ledger([tool_entry("C1", "container_health", [
+        {"name": "web", "status": "running", "health": "healthy", "restart_count": 0, "oom_killed": False}])])
+    assert ok("C1", "container", "oom_killed false", led=led)[S.EV_VALIDATED] is False  # healthy rows are not shown
+
+
+def test_key_value_quote_works_for_an_entry_too_thin_to_render():
+    led = {"M1": {"id": "M1", "result": {"items": [{"p95_ms": 15000.0}]}}}
+    assert ok("M1", "metric", '"p95_ms":15000.0', led=led)[S.EV_VALIDATED] is True
+    assert ok("M1", "metric", '"p95_ms":9000.0', led=led)[S.EV_VALIDATED] is False
+
+
+def test_key_value_shape_is_not_applied_to_log_entries():
+    led = {"L1": {"id": "L1", "tool": "query_logs", "result": {"items": [{"count": 15000, "message": "something failed"}]}}}
+    assert ok("L1", "log", '"count":15000', led=led)[S.EV_VALIDATED] is False
+
+
+def test_quote_may_be_a_string_as_the_view_escapes_it():
+    message = 'upstream said "no route" to host'
+    led = {"L1": {"id": "L1", "tool": "query_logs", "result": {"items": [{"message": message}]}}}
+    assert ok("L1", "log", message, led=led)[S.EV_VALIDATED] is True
+    assert ok("L1", "log", r'upstream said \"no route\" to host', led=led)[S.EV_VALIDATED] is True
+    assert ok("L1", "log", r'upstream said \"no road\" to host', led=led)[S.EV_VALIDATED] is False
+
+
+def test_json_fragments_that_span_values_are_still_rejected():
+    for quote in ('15000.0,"error_rate_pct"', '":15000.0,"', '{"service":"cart","p95_ms"'):
+        assert ok("M1", "metric", quote)[S.EV_VALIDATED] is False, quote

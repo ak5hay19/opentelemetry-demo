@@ -10,7 +10,12 @@ An item is valid only when the model's own words can be found in what the tools 
      value exactly. Metric entries also carry text such as "errors 0.00% -> 3.38%"; a quote that is an
      exact substring of that text is valid by rule 2;
   4. if a value is given it must also occur in the same entry (exact text, or an equal number);
-  5. a log or trace quote that is only a timestamp, or shorter than MIN_LOG_TRACE_QUOTE_CHARS, is rejected.
+  5. a log or trace quote that is only a timestamp, or shorter than MIN_LOG_TRACE_QUOTE_CHARS, is rejected;
+  6. for a metric or container entry a quote (or value) shaped like a key and a value, as copied from the compact
+     JSON view the model was shown (`"p95_ms":15000.0`, `oom_killed":true`, `oom_killed true`), is parsed and
+     checked structurally: the key must occur in that entry's view and the value must equal one of its values
+     (numbers by rules 3, booleans and strings exactly). Rule 2 also accepts a string as the view renders it
+     (JSON-escaped).
 The kind used for rules 3 and 5 comes from the ledger entry (see `derived_kind`), not from the model's label.
 A separate soft check only warns when no valid item's entry mentions the claimed component.
 
@@ -26,7 +31,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from oncall import schema as S
-from tools.ledger import PREFIXES
+from oncall import toolbox
+from tools.ledger import PREFIXES, LedgerEntry
 
 METRIC_REL_TOL = 0.02
 METRIC_ABS_TOL = 0.05
@@ -42,6 +48,10 @@ KIND_BY_PREFIX = {PREFIXES[tool]: kind for tool, kind in KIND_BY_TOOL.items()}
 
 # A bare ISO 8601 timestamp such as 2026-10-24T10:00:00.123Z or "2026-10-24 10:00:00+00:00".
 TIMESTAMP_ONLY = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?")
+
+# A key and a value as they appear in the compact JSON view: an optional opening quote, an identifier-like key,
+# an optional closing quote, then ":" or "=" (spaces allowed around it) or just whitespace, then the value.
+KEY_VALUE = re.compile(r'"?(?P<key>[A-Za-z_][\w.\-]*)"?(?:\s*[:=]\s*|\s+)(?P<value>\S.*)', re.DOTALL)
 
 
 @dataclass
@@ -141,9 +151,14 @@ def _significant_digits(text: str) -> int:
     return len(digits.lstrip("0"))
 
 
+def _is_precise(quote: str, quoted: float) -> bool:
+    """Only a non-zero quote with enough significant digits earns the tolerance; anything else must be exact."""
+    return quoted != 0 and _significant_digits(quote) >= MIN_SIGNIFICANT_DIGITS
+
+
 def _number_matches(quote: str, quoted: float, numbers: list[float]) -> tuple[float | None, str]:
     """(a number of the entry the quote matches, how) or (None, why not). Tolerance needs a precise quote."""
-    if quoted != 0 and _significant_digits(quote) >= MIN_SIGNIFICANT_DIGITS:
+    if _is_precise(quote, quoted):
         close = [n for n in numbers if _within_tolerance(quoted, n)]
         return (close[0], "within tolerance") if close else (None, f"no number within 2% or 0.05 of {quote}")
     exact = [n for n in numbers if n == quoted]
@@ -160,6 +175,75 @@ def _trivial_text_quote(quote: str, kind: str | None) -> str | None:
     if len(quote) < MIN_LOG_TRACE_QUOTE_CHARS:
         return f"is shorter than {MIN_LOG_TRACE_QUOTE_CHARS} characters"
     return None
+
+
+# --- key and value quotes ----------------------------------------------------------------------
+
+def _searchable(entry: dict):
+    """What the model was shown for this entry (the toolbox's compact view, without the id), or, when the entry
+    is too thin to render, what the tool observed."""
+    try:
+        view = toolbox.compact_view(LedgerEntry(
+            id=str(entry.get("id")), tool=entry.get("tool"), arguments={}, query=[], window={}, timestamp="",
+            result=entry.get("result")))
+    except (KeyError, TypeError, AttributeError):
+        return _observed(entry)
+    view.pop("id", None)
+    return view
+
+
+def _values_of_key(node, key: str):
+    """Every value stored under `key` anywhere in a nested structure (the elements too when it is a list)."""
+    if isinstance(node, dict):
+        for name, value in node.items():
+            if name == key:
+                yield value
+                if isinstance(value, (list, tuple)):
+                    yield from value
+            yield from _values_of_key(value, key)
+    elif isinstance(node, (list, tuple)):
+        for value in node:
+            yield from _values_of_key(value, key)
+
+
+def _parse_value(text: str):
+    """(value, the text it came from) for the value half of a key/value quote: JSON when it is JSON,
+    true/false in any case as booleans, otherwise the bare text as a string."""
+    text = text.strip()
+    for candidate in (text, text.rstrip(",} ").rstrip()):
+        try:
+            return json.loads(candidate), candidate
+        except ValueError:
+            continue
+    bare = text.rstrip(",} ").strip()
+    return ({"true": True, "false": False}.get(bare.lower(), bare)), bare
+
+
+def _value_agrees(parsed, raw: str, actual) -> bool:
+    if isinstance(parsed, bool) or isinstance(actual, bool):
+        return isinstance(parsed, bool) and isinstance(actual, bool) and parsed == actual
+    if isinstance(actual, (int, float)):
+        quoted = parsed if isinstance(parsed, (int, float)) else _as_number(parsed) if isinstance(parsed, str) else None
+        if quoted is None:
+            return False
+        return _within_tolerance(quoted, actual) if _is_precise(raw, quoted) else quoted == actual
+    return parsed == actual
+
+
+def _check_key_value(text: str, searchable) -> tuple[bool, str] | None:
+    """None when `text` is not key/value shaped or its key is not in the entry (the ordinary rules then decide);
+    otherwise (whether some occurrence of the key has that value, why)."""
+    match = KEY_VALUE.fullmatch(text.strip())
+    if not match:
+        return None
+    key = match["key"]
+    actuals = list(_values_of_key(searchable, key))
+    if not actuals:
+        return None
+    parsed, raw = _parse_value(match["value"])
+    if any(_value_agrees(parsed, raw, actual) for actual in actuals):
+        return True, f"{key} = {raw}"
+    return False, f"{key} is in the entry but never with the value {raw}"
 
 
 # --- one item ----------------------------------------------------------------------------------
@@ -181,11 +265,17 @@ def _check_item(item: dict, ledger: dict[str, dict]) -> tuple[bool, str]:
         return False, f"{ledger_id}: quote {quote!r} {trivial}"
 
     texts, numbers = _split(_observed(entry))
+    keyed = kind in (KIND_METRIC, KIND_CONTAINER)
+    searchable = _searchable(entry) if keyed else None
 
     found = False
     note = ""
-    if len(quote) >= MIN_QUOTE_CHARS and any(quote in text for text in texts):
+    if len(quote) >= MIN_QUOTE_CHARS and any(quote in text or quote in json.dumps(text)[1:-1] for text in texts):
         found, note = True, f"quote found verbatim in {ledger_id}"
+    elif keyed and (pair := _check_key_value(quote, searchable)) is not None:
+        if not pair[0]:
+            return False, f"{ledger_id}: quote {quote!r}: {pair[1]}"
+        found, note = True, f"quote {pair[1]} found in {ledger_id}"
     elif kind == KIND_METRIC:
         quoted = _as_number(quote)
         if quoted is None:
@@ -204,7 +294,10 @@ def _check_item(item: dict, ledger: dict[str, dict]) -> tuple[bool, str]:
         number = _as_number(value)
         in_text = any(value in text for text in texts)
         in_numbers = number is not None and any(number == n for n in numbers)
-        if not (in_text or in_numbers):
+        pair = _check_key_value(value, searchable) if keyed and not (in_text or in_numbers) else None
+        if pair is not None and not pair[0]:
+            return False, f"{ledger_id}: value {value!r}: {pair[1]}"
+        if not (in_text or in_numbers or pair):
             return False, f"{ledger_id}: value {value!r} not found in the entry"
         note += f"; value {value!r} found"
     return True, note
