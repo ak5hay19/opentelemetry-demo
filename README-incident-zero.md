@@ -1,6 +1,6 @@
 # Incident Zero: an AI on-call engineer
 
-> Stub. Written up properly on Day 2 (setup, how to run, approval gate, kill switch, known limitations).
+> Day 1 version. The approval gate and kill switch are Day 2 and are not built yet (see Status).
 
 An agent that investigates an incident in the OpenTelemetry Demo using read-only tools
 (metrics, traces, logs, container health), then reports a root cause with evidence and a
@@ -26,6 +26,47 @@ The demo must already be running (`make start`).
 .venv/bin/python -m tools.snapshot           # container_health + query_metrics once, as a table
 .venv/bin/python -m pytest                   # unit tests (no live demo needed)
 ```
+
+## Run an investigation
+
+```bash
+.venv/bin/python -m oncall.investigate --summary
+```
+
+Options: `--symptom TEXT`, `--steps N` (tool-call budget), `--token-budget N`. The agent gets only a generic
+symptom and picks its own tools. It prints the steps, the candidate diagnosis (not validated yet) and the tokens used,
+and saves `ledger.json`, `candidate.json` and `run_info.json` (plus `rejected_submissions.json` when its answer was
+rejected) to `reports/runs/<run id>/`. That folder is gitignored.
+
+Practice incidents are created with `dev/faultctl` (a separate package the agent never imports); every inject and reset is
+logged to `tests/ground_truth.md`.
+
+## Docs
+
+- `docs/ARCHITECTURE.md`: one-page architecture, tools, how the agent decides, safety controls.
+- `docs/SYSTEM_PROMPT.md`: copy of the agent's system prompt.
+- `docs/EVALUATION.md`: evaluation note (skeleton until the harness sweep has run).
+- `docs/DECLARATIONS.md`: AI tools, models and libraries used.
+
+## Status
+
+| Part | State |
+|---|---|
+| Read-only tools, sanitiser, evidence ledger | Built |
+| Investigation loop, candidate diagnosis, symptom summary | Built |
+| Fault injector (`dev/faultctl`) | Built |
+| Report schema, evidence validator, confidence caps, escalation (P6) | In progress on `p6-checks` |
+| Test harness runner and scoring (P7) | In progress on `p7-runner`, `p7-scoring` |
+| Detector, Action API, human approval gate, kill switch, recovery check | Day 2, not started |
+
+## Handover
+
+- The agent is read-only. Nothing in `oncall/` or `tools/` can change the demo.
+- The diagnosis in `candidate.json` is a candidate: its quotes are not checked against the ledger until P6 is merged.
+- Never put a key in the demo's tracked `.env`. Settings and the key go in `.env.incident` (gitignored).
+- Commit explicit paths only (never `git add -A`). If `src/flagd/demo.flagd.json` shows as modified after a reset, do not commit it.
+- To change how the agent investigates, edit `oncall/prompts.py` and keep it generic: no service, fault or flag names. Refresh `docs/SYSTEM_PROMPT.md` afterwards.
+- Run `python -m pytest` before every commit; `tests/test_leak.py` and `tests/test_isolation.py` guard flag isolation.
 
 ## Verified facts
 
