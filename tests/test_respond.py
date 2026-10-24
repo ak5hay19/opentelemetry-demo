@@ -27,6 +27,18 @@ def test_proposal_is_written_next_to_the_run_that_was_just_created(tmp_path, mon
     assert not (old / "proposal.json").exists()
 
 
+def test_approve_flag_asks_a_human_and_saves_the_decision(tmp_path, monkeypatch):
+    monkeypatch.setattr(respond.investigate, "main", fake_investigate("inc-new"))
+    assert respond.main(["--approve"], llm=ScriptedLLM(choose(**GOOD)), runs_dir=tmp_path, ask=lambda p: "yes") == 0
+    assert json.loads((tmp_path / "inc-new" / "decision.json").read_text(encoding="utf-8"))["status"] == "approved"
+
+
+def test_without_the_approve_flag_nobody_is_asked(tmp_path, monkeypatch):
+    monkeypatch.setattr(respond.investigate, "main", fake_investigate("inc-new"))
+    assert respond.main([], llm=ScriptedLLM(choose(**GOOD)), runs_dir=tmp_path) == 0
+    assert not (tmp_path / "inc-new" / "decision.json").exists()
+
+
 def test_a_failed_investigation_stops_before_the_suggester(tmp_path, monkeypatch):
     monkeypatch.setattr(respond.investigate, "main", fake_investigate(None, status=2))
     llm = ScriptedLLM()
