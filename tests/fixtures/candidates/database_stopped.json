@@ -1,0 +1,18 @@
+{
+  "component": "astronomy-db",
+  "cause": "The astronomy-db database container exited at 11:42:07 and has not restarted. product-catalog cannot open a database connection, so product listing and search fail and the frontend shows errors.",
+  "stated_confidence": 0.82,
+  "evidence": [
+    {"ledger_id": "C1", "kind": "container", "claim": "astronomy-db is exited with restart_count 0.", "quote": "astronomy-db", "value": "exited"},
+    {"ledger_id": "L1", "kind": "log", "claim": "product-catalog logs connection failures to the database starting at 11:42:08.", "quote": "failed to connect to database: connection refused", "value": "2026-10-24T11:42:08.211Z"},
+    {"ledger_id": "T1", "kind": "trace", "claim": "Error traces start in product-catalog at the database query span.", "quote": "ListProducts", "value": null},
+    {"ledger_id": "M1", "kind": "metric", "claim": "product-catalog error rate rose from 0% to 100% in the window.", "quote": "errors 0.00% -> 100.00%", "value": null}
+  ],
+  "alternatives_considered": [
+    {"hypothesis": "product-catalog itself crashed.", "why_rejected": "Its container is running and healthy; only its database calls fail."},
+    {"hypothesis": "Network problem between product-catalog and the database.", "why_rejected": "The database container is not running at all, which explains the refused connections."}
+  ],
+  "limitations": [
+    "I did not read the database's own logs, so why it exited is unknown."
+  ]
+}

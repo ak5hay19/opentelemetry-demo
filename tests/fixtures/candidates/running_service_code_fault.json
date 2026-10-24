@@ -1,0 +1,18 @@
+{
+  "component": "payment",
+  "cause": "The payment service is running and healthy but rejects every charge request with an 'Invalid token' error raised in its own charge handler. checkout fails as a consequence.",
+  "stated_confidence": 0.85,
+  "evidence": [
+    {"ledger_id": "L1", "kind": "log", "claim": "payment logs the same failure on every charge, 13 times.", "quote": "Payment request failed. Invalid token.", "value": null},
+    {"ledger_id": "T1", "kind": "trace", "claim": "The deepest erroring span in the error traces is the charge span inside payment.", "quote": "charge", "value": null},
+    {"ledger_id": "M1", "kind": "metric", "claim": "payment error rate is 100% while its latency is low.", "quote": "error_rate_pct 100.0", "value": null},
+    {"ledger_id": "C1", "kind": "container", "claim": "payment is running and healthy with no restarts.", "quote": "payment", "value": "running"}
+  ],
+  "alternatives_considered": [
+    {"hypothesis": "payment container crashed.", "why_rejected": "It is running, healthy and has restart_count 0."},
+    {"hypothesis": "Resource starvation.", "why_rejected": "CPU and memory are normal."}
+  ],
+  "limitations": [
+    "The source of the invalid token is not visible in the telemetry."
+  ]
+}

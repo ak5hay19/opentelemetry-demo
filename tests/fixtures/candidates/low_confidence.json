@@ -1,0 +1,15 @@
+{
+  "component": "checkout",
+  "cause": "Checkout latency is elevated but the evidence does not show why. It may be a slow dependency or the load.",
+  "stated_confidence": 0.42,
+  "evidence": [
+    {"ledger_id": "M1", "kind": "metric", "claim": "checkout p95 latency is 7500 ms.", "quote": "checkout 7500.0 ms", "value": null}
+  ],
+  "alternatives_considered": [
+    {"hypothesis": "Slow payment calls.", "why_rejected": "Payment latency looked normal, but it was only sampled once."}
+  ],
+  "limitations": [
+    "Only one signal type was checked.",
+    "No traces or logs were examined for checkout."
+  ]
+}

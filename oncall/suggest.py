@@ -231,7 +231,8 @@ def print_proposal(p: Proposal) -> None:
 
 
 def _latest_run(runs_dir: Path) -> Path:
-    runs = sorted((p for p in runs_dir.iterdir() if (p / "candidate.json").exists()), key=lambda p: p.stat().st_mtime)
+    runs = sorted((p for p in runs_dir.iterdir() if (p / "candidate.json").exists()),
+                  key=lambda p: (p / "candidate.json").stat().st_mtime)
     if not runs:
         raise FileNotFoundError(f"no run with a candidate.json in {runs_dir}")
     return runs[-1]
@@ -242,7 +243,9 @@ def main(argv: list[str] | None = None, llm=None, runs_dir: Path = RUNS_DIR) -> 
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--run", help="run id under reports/runs")
     source.add_argument("--candidate", help="path to a candidate.json")
+    parser.add_argument("--no-save", action="store_true", help="print the proposal but do not write proposal.json")
     args = parser.parse_args(argv)
+    sys.stdout.reconfigure(encoding="utf-8")  # the Windows console default cannot print every character a model writes
 
     try:
         path = Path(args.candidate) if args.candidate else (Path(runs_dir) / args.run if args.run else _latest_run(Path(runs_dir)))
@@ -261,6 +264,8 @@ def main(argv: list[str] | None = None, llm=None, runs_dir: Path = RUNS_DIR) -> 
 
     proposal = suggest(candidate, llm)
     print_proposal(proposal)
+    if args.no_save:
+        return 0
     out = path.parent / "proposal.json"
     out.write_text(json.dumps(proposal.to_dict(), indent=2) + "\n", encoding="utf-8")
     print(f"saved to {out}")

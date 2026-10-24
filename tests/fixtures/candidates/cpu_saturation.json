@@ -1,0 +1,17 @@
+{
+  "component": "ad",
+  "cause": "The ad service is running but its CPU is saturated at 99%, so requests queue and p95 latency has risen from 40 ms to 4200 ms. The frontend slows down on every page that requests ads. Nothing crashed.",
+  "stated_confidence": 0.78,
+  "evidence": [
+    {"ledger_id": "C1", "kind": "container", "claim": "ad is running and healthy but at 99% CPU.", "quote": "ad", "value": "99"},
+    {"ledger_id": "M1", "kind": "metric", "claim": "ad p95 latency rose from 40 ms to 4200 ms with no rise in error rate.", "quote": "p95 40 ms -> 4200 ms", "value": null},
+    {"ledger_id": "T1", "kind": "trace", "claim": "The slowest traces spend their time in the ad service's GetAds span.", "quote": "oteldemo.AdService/GetAds", "value": null}
+  ],
+  "alternatives_considered": [
+    {"hypothesis": "Memory pressure.", "why_rejected": "Memory use is normal; only CPU is high."},
+    {"hypothesis": "A downstream dependency is slow.", "why_rejected": "The time is spent inside the ad service's own span, not in a call it makes."}
+  ],
+  "limitations": [
+    "I could not tell whether the CPU load comes from traffic volume or from something inside the service."
+  ]
+}

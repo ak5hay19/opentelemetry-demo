@@ -1,0 +1,14 @@
+{
+  "component": "cart",
+  "cause": "The cart service returns errors on GetCart and has the highest error rate in the shop, so it is the likely source of the checkout failures.",
+  "stated_confidence": 0.75,
+  "evidence": [
+    {"ledger_id": "M1", "kind": "metric", "claim": "cart error rate is 38% over the window.", "quote": "cart 38.0%", "value": null},
+    {"ledger_id": "L1", "kind": "log", "claim": "cart logs connection errors.", "quote": "Wasn't able to connect to redis", "value": null},
+    {"ledger_id": "C1", "kind": "container", "claim": "cart is running and healthy.", "quote": "cart", "value": "running"}
+  ],
+  "alternatives_considered": [],
+  "limitations": [
+    "I did not look at the containers cart depends on."
+  ]
+}
