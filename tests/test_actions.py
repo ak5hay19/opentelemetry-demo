@@ -1,4 +1,5 @@
 """Offline tests for actions/: fake health, fake command runner, fake clock. No Docker, no LLM."""
+import inspect
 import json
 import subprocess
 from pathlib import Path
@@ -268,10 +269,41 @@ def test_verify_recovered(proposal):
     assert out["checks"][0]["at"] and "nothing to roll back" in out["note"]
 
 
-def test_verify_not_recovered_when_container_down_or_errors_high(proposal):
+def test_verify_not_recovered_only_when_the_container_never_becomes_healthy(proposal):
     out = run_check(proposal, DOWN, metrics_data(0.0))
     assert out["state"] == "not_recovered" and out["escalate"] and len(out["checks"]) == 4
-    assert run_check(proposal, UP, metrics_data(0.0, 40.0))["state"] == "not_recovered"
+    assert "exited" in out["detail"]
+    unhealthy = fake_health(row("valkey-cart", "running", "unhealthy"))
+    assert run_check(proposal, unhealthy, metrics_data(0.0))["state"] == "not_recovered"
+    assert run_check(proposal, DOWN, metrics_data(40.0))["state"] == "not_recovered"
+
+
+def test_verify_elevated_errors_with_a_healthy_container_is_unverified_not_failed(proposal):
+    out = run_check(proposal, UP, metrics_data(0.0, 40.0))
+    assert out["state"] == "recovered_unverified_metrics" and out["escalate"] is False
+    assert "svc1" in out["detail"] and "pre-restart errors" in out["detail"]
+    assert out["checks"][-1]["metrics"]["above_threshold"] == ["svc1"]
+    assert len(out["checks"]) == 4
+
+
+def test_verify_errors_that_clear_during_the_wait_become_recovered(proposal):
+    results = iter([metrics_data(40.0), metrics_data(40.0), metrics_data(1.0)])
+    out = run_check(proposal, UP, lambda **kw: next(results)(**kw))
+    assert out["state"] == "recovered" and len(out["checks"]) == 3
+
+
+def test_verify_ignores_the_load_generator(proposal):
+    assert verify.IGNORED_SERVICES == {"load-generator"}
+    items = [{"service": "load-generator", "error_rate_pct": 90.0}, {"service": "cart", "error_rate_pct": 0.5}]
+    metrics = lambda **kw: ToolResult("query_metrics", "data", ["q"], {}, items=items, total_items=2)
+    out = run_check(proposal, UP, metrics)
+    assert out["state"] == "recovered" and out["checks"][0]["metrics"]["above_threshold"] == []
+    only_loadgen = lambda **kw: ToolResult("query_metrics", "data", ["q"], {}, items=items[:1], total_items=1)
+    assert run_check(proposal, UP, only_loadgen)["state"] == "recovered"
+
+
+def test_verify_default_timeout_is_180_seconds():
+    assert inspect.signature(verify.check_recovery).parameters["timeout_s"].default == 180
 
 
 def test_verify_recovers_after_a_few_polls(proposal):
@@ -291,6 +323,7 @@ def test_no_data_is_never_proof_of_health(proposal, state):
     out = run_check(proposal, UP, metrics_state(state))
     assert out["state"] == "recovered_unverified_metrics" and out["escalate"] is False
     assert out["checks"][-1]["metrics"]["state"] == state
+    assert state in out["detail"] and "not confirmed" in out["detail"]
 
 
 # --- incident report --------------------------------------------------------------------------
