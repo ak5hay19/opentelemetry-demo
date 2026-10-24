@@ -5,6 +5,7 @@ Every argument except `report` may be None (no proposal, no approval, nothing ex
 import json
 from pathlib import Path
 
+from actions import registry
 from actions.runner import KILL_TEXT
 from oncall import schema as S
 
@@ -32,6 +33,11 @@ PREVENTION = {
         "Run the service with a restart policy (restart: unless-stopped) so a crash heals itself.",
         "Add a health check and an alert on 'container not running' so it is caught before users see errors.",
         "Find out why the container stopped (its logs, exit code, memory limit) before relying on restarts.",
+    ],
+    "disable_fault_flag": [
+        "Alert on error rate and latency per service so a bad toggle is noticed before users report it.",
+        "Review and audit toggle changes, and give any temporary fault toggle an owner and an expiry.",
+        "Find out how the toggle came to be on, and keep fault-injection toggles out of production configuration.",
     ],
 }
 PREVENTION_NONE = ["Review the findings and decide the fix by hand; no automatic action applies to this incident."]
@@ -122,8 +128,11 @@ def render_markdown(doc: dict) -> str:
     if action.get("taken") is False:
         lines.append(f"- No action proposed: {action['why_none']}")
     else:
-        lines += [f"- Proposed: {action['action_id']} {action['params']} (risk {action['risk']})",
-                  f"- Exact command: {action['preview']}"]
+        flags = action["params"].get("flags")
+        lines.append(f"- Proposed: {action['action_id']} {action['params']} (risk {action['risk']})")
+        if flags:
+            lines.append(f"- Toggles set to off: {', '.join(flags)}")
+        lines.append(f"- {registry.ACTIONS[action['action_id']]['label'].capitalize()}: {action['preview']}")
     approval = doc["approval"]
     lines.append(f"- Approval: {approval['decision']}" + (f" by {approval['by']} at {approval['at']}" if "at" in approval else ""))
     execution = doc["execution"]
