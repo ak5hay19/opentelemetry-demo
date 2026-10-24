@@ -17,6 +17,7 @@ COLUMNS = [
     "agent_said",
     "correct",
     "stated_confidence",
+    "final_confidence",
     "status",
     "evidence_valid",
     "steps",
@@ -25,6 +26,10 @@ COLUMNS = [
     "verdict",
     "notes",
 ]
+COMPOSE_PROJECT = "opentelemetry-demo"
+UNKNOWN_COMPONENTS = {"", "n/a", "unknown"}
+EXCLUDED_VERDICTS = {"unclean baseline", "inject failed", "no run data", "expected unknown"}
+CONFIDENT_WRONG_THRESHOLD = 0.7
 CONFIDENCE_BUCKETS = (
     (0.0, 0.3, "0-0.3"),
     (0.3, 0.6, "0.3-0.6"),
@@ -53,15 +58,24 @@ def _display_confidence(value: float | None) -> str:
     return f"{value:g}" if value is not None else "n/a"
 
 
-def _component_matches(expected: str, actual: str) -> bool:
-    """Match case-insensitively when the expected service is a whole word in the diagnosis.
+def _is_unknown(component: str) -> bool:
+    return component.strip().lower() in UNKNOWN_COMPONENTS
 
-    This accepts compose/container forms such as ``paymentservice-1`` while rejecting
-    unrelated names that merely share a substring.
+
+def _component_matches(expected: str, actual: str) -> bool:
+    """Match case-insensitively on the whole component name.
+
+    Accepts the exact name (``valkey-cart``) or the compose container form with the project
+    prefix and an optional numeric suffix (``opentelemetry-demo-valkey-cart-1``). A name that
+    merely contains the expected one does not match: ``cart`` is not ``valkey-cart``.
     """
-    if not expected.strip() or not actual.strip():
+    expected, actual = expected.strip(), actual.strip()
+    if _is_unknown(expected) or _is_unknown(actual):
         return False
-    pattern = rf"(?<!\w){re.escape(expected.strip())}(?!\w)"
+    if expected.lower() == actual.lower():
+        return True
+    # Optional "<compose project>-" prefix, the expected name, then an optional "-<number>" replica suffix.
+    pattern = rf"^({re.escape(COMPOSE_PROJECT)}-)?{re.escape(expected)}(-\d+)?$"
     return re.search(pattern, actual, flags=re.IGNORECASE) is not None
 
 
@@ -85,21 +99,30 @@ def _read_evidence_validity(report: dict) -> str:
     return f"{sum(validations)}/{len(validations)}"
 
 
-def _load_run(run_dir_value: Any, base_dir: Path, notes: list[str]) -> tuple[dict, dict, dict | None]:
+def _repository_root(base_dir: Path) -> Path | None:
+    parents = base_dir.resolve().parents
+    return parents[2] if len(parents) > 2 else None
+
+
+def _load_run(run_dir_value: Any, base_dir: Path, notes: list[str]) -> tuple[dict, dict, dict | None] | None:
+    """Return the saved run files, or None (with a note) when the run folder cannot be used."""
     if not isinstance(run_dir_value, str) or not run_dir_value.strip():
         notes.append("run directory is missing")
-        return {}, {}, None
+        return None
 
     run_dir = Path(run_dir_value)
     if not run_dir.is_absolute():
-        repository_root = base_dir.parents[2]
+        repository_root = _repository_root(base_dir)
+        if repository_root is None:
+            notes.append(f"cannot locate the repository root from {base_dir}")
+            return None
         run_dir = repository_root / run_dir
     candidate_path = run_dir / "candidate.json"
     info_path = run_dir / "run_info.json"
     if not candidate_path.exists() or not info_path.exists():
         missing = [path.name for path in (candidate_path, info_path) if not path.exists()]
         notes.append(f"run data is missing: {', '.join(missing)}")
-        return {}, {}, None
+        return None
     candidate = _as_object(_read_json(candidate_path), "candidate", candidate_path)
     run_info = _as_object(_read_json(info_path), "run info", info_path)
 
@@ -129,39 +152,51 @@ def _cost_value(run_info: dict) -> str:
 
 def _build_row(entry: dict, base_dir: Path) -> tuple[dict[str, str], float | None, float | None]:
     notes: list[str] = []
-    candidate, run_info, report = _load_run(entry.get("run_dir"), base_dir, notes)
+    try:
+        run = _load_run(entry.get("run_dir"), base_dir, notes)
+    except ValueError as exc:
+        notes.append(str(exc))
+        run = None
+    candidate, run_info, report = run if run is not None else ({}, {}, None)
+
     expected = entry.get("expected_component")
     expected = expected.strip() if isinstance(expected, str) else ""
     agent_said = candidate.get("component")
     agent_said = agent_said.strip() if isinstance(agent_said, str) and agent_said.strip() else "n/a"
 
-    confidence_source = report.get("confidence") if report is not None else candidate.get("stated_confidence")
-    confidence = _confidence(confidence_source)
-    if report is not None and confidence is None:
-        confidence = _confidence(candidate.get("stated_confidence"))
+    stated_confidence = _confidence(candidate.get("stated_confidence"))
+    final_confidence = _confidence(report.get("confidence")) if report is not None else None
+    verdict_confidence = final_confidence if final_confidence is not None else stated_confidence
 
     baseline_clean = entry.get("baseline_clean") is True
     inject_verified = entry.get("inject_verified") is True
-    eligible = baseline_clean and inject_verified
-    correct_value: bool | None = _component_matches(expected, agent_said) if eligible else None
     status = report.get("status") if report is not None and isinstance(report.get("status"), str) else "n/a"
     evidence_valid = _read_evidence_validity(report) if report is not None else "n/a"
 
+    correct_value: bool | None = None
     if not baseline_clean:
         verdict = "unclean baseline"
     elif not inject_verified:
         verdict = "inject failed"
-    elif report is not None and status == "escalated":
-        verdict = "correct but escalated" if correct_value else "wrong, escalated"
-    elif correct_value:
-        verdict = "correct"
-    elif confidence is not None and confidence >= 0.7:
-        verdict = "confidently wrong"
+    elif run is None:
+        verdict = "no run data"
+    elif _is_unknown(expected):
+        verdict = "expected unknown"
     else:
-        verdict = "wrong"
+        correct_value = _component_matches(expected, agent_said)
+        if report is not None and status == "escalated":
+            verdict = "correct but escalated" if correct_value else "wrong escalated"
+        elif correct_value:
+            verdict = "correct"
+        elif verdict_confidence is not None and verdict_confidence >= CONFIDENT_WRONG_THRESHOLD:
+            verdict = "confidently wrong"
+        else:
+            verdict = "wrong"
 
     if not expected:
         notes.append("expected component is missing")
+    elif _is_unknown(expected):
+        notes.append("expected component is unknown")
     entry_notes = entry.get("notes")
     if isinstance(entry_notes, str) and entry_notes.strip():
         notes.insert(0, entry_notes.strip())
@@ -181,7 +216,8 @@ def _build_row(entry: dict, base_dir: Path) -> tuple[dict[str, str], float | Non
         "expected": expected or "n/a",
         "agent_said": agent_said,
         "correct": "yes" if correct_value is True else "no" if correct_value is False else "n/a",
-        "stated_confidence": _display_confidence(confidence),
+        "stated_confidence": _display_confidence(stated_confidence),
+        "final_confidence": _display_confidence(final_confidence),
         "status": status,
         "evidence_valid": evidence_valid,
         "steps": steps_value,
@@ -190,28 +226,30 @@ def _build_row(entry: dict, base_dir: Path) -> tuple[dict[str, str], float | Non
         "verdict": verdict,
         "notes": "; ".join(notes),
     }
-    return row, confidence, estimated
+    return row, stated_confidence, estimated
 
 
-def build_rows(manifest_dir: str | Path) -> list[dict[str, str]]:
-    """Build scoring rows from a harness manifest and its saved run folders."""
-    directory = Path(manifest_dir)
+def _score_manifest(directory: Path) -> list[tuple[dict[str, str], float | None, float | None]]:
     manifest_path = directory / "manifest.json"
     manifest = _read_json(manifest_path)
     if not isinstance(manifest, list):
         raise ValueError(f"manifest in {manifest_path} must be a JSON list")
-
-    rows = []
+    scored = []
     for index, item in enumerate(manifest):
         if not isinstance(item, dict):
             raise ValueError(f"manifest entry {index} in {manifest_path} must be a JSON object")
-        row, _, _ = _build_row(item, directory)
-        rows.append(row)
-    return rows
+        scored.append(_build_row(item, directory))
+    return scored
+
+
+def build_rows(manifest_dir: str | Path) -> list[dict[str, str]]:
+    """Build scoring rows from a harness manifest and its saved run folders."""
+    return [row for row, _, _ in _score_manifest(Path(manifest_dir))]
 
 
 def _summary(rows: list[dict[str, str]], details: list[tuple[float | None, float | None]]) -> list[str]:
-    scored = [row for row in rows if row["verdict"] not in {"inject failed", "unclean baseline"}]
+    scored = [row for row in rows if row["verdict"] not in EXCLUDED_VERDICTS]
+    excluded = [f"{row['incident']} ({row['verdict']})" for row in rows if row["verdict"] in EXCLUDED_VERDICTS]
     correct_count = sum(row["correct"] == "yes" for row in scored)
     accuracy = correct_count / len(scored) if scored else None
     confident_wrong = sum(row["verdict"] == "confidently wrong" for row in rows)
@@ -224,14 +262,15 @@ def _summary(rows: list[dict[str, str]], details: list[tuple[float | None, float
         "",
         f"- Accuracy: {correct_count}/{len(scored)} ({accuracy:.1%})" if accuracy is not None
         else "- Accuracy: n/a (no scored incidents)",
+        f"- Excluded from accuracy: {', '.join(excluded) if excluded else 'none'}",
         f"- Confidently wrong: {confident_wrong}",
         f"- Correct but escalated: {correct_escalated}",
         f"- Average estimated cost: ${average_cost:.6f}" if average_cost is not None
         else "- Average estimated cost: n/a",
         "",
-        "### Confidence calibration",
+        "### Confidence calibration (by stated confidence)",
         "",
-        "| Confidence | Runs | Correct | Fraction correct |",
+        "| Stated confidence | Runs | Correct | Fraction correct |",
         "|---|---:|---:|---:|",
     ]
     for lower, upper, label in CONFIDENCE_BUCKETS:
@@ -239,7 +278,7 @@ def _summary(rows: list[dict[str, str]], details: list[tuple[float | None, float
             row for row, (confidence, _) in zip(rows, details)
             if confidence is not None
             and (lower <= confidence < upper or (upper == 1.0 and confidence == 1.0))
-            and row["verdict"] not in {"inject failed", "unclean baseline"}
+            and row["verdict"] not in EXCLUDED_VERDICTS
         ]
         count_correct = sum(row["correct"] == "yes" for row in bucket)
         fraction = f"{count_correct / len(bucket):.1%}" if bucket else "n/a"
@@ -255,19 +294,9 @@ def _markdown_cell(value: str) -> str:
 
 def write_results(manifest_dir: str | Path) -> tuple[Path, Path]:
     directory = Path(manifest_dir)
-    manifest_path = directory / "manifest.json"
-    manifest = _read_json(manifest_path)
-    if not isinstance(manifest, list):
-        raise ValueError(f"manifest in {manifest_path} must be a JSON list")
-
-    rows: list[dict[str, str]] = []
-    details: list[tuple[float | None, float | None]] = []
-    for index, item in enumerate(manifest):
-        if not isinstance(item, dict):
-            raise ValueError(f"manifest entry {index} in {manifest_path} must be a JSON object")
-        row, confidence, cost = _build_row(item, directory)
-        rows.append(row)
-        details.append((confidence, cost))
+    scored = _score_manifest(directory)
+    rows = [row for row, _, _ in scored]
+    details = [(confidence, cost) for _, confidence, cost in scored]
 
     csv_path = directory / "results.csv"
     with csv_path.open("w", encoding="utf-8", newline="") as output:

@@ -95,7 +95,8 @@ def test_report_confidence_status_and_validated_evidence(tmp_path):
     }
     harness_dir = make_harness(tmp_path, [entry(component="shipping", confidence=0.99, report=report)])
     row = build_rows(harness_dir)[0]
-    assert row["stated_confidence"] == "0.65"
+    assert row["stated_confidence"] == "0.99"
+    assert row["final_confidence"] == "0.65"
     assert row["status"] == "diagnosed"
     assert row["evidence_valid"] == "1/2"
     assert row["verdict"] == "wrong"
@@ -105,7 +106,7 @@ def test_report_confidence_status_and_validated_evidence(tmp_path):
     ("component", "report", "verdict"),
     [
         ("paymentservice", {"status": "escalated"}, "correct but escalated"),
-        ("shipping", {"status": "escalated"}, "wrong, escalated"),
+        ("shipping", {"status": "escalated"}, "wrong escalated"),
     ],
 )
 def test_escalated_verdicts(tmp_path, component, report, verdict):
@@ -122,7 +123,8 @@ def test_missing_report_and_missing_run_dir_are_supported(tmp_path):
     assert rows[0]["status"] == "n/a"
     assert rows[0]["evidence_valid"] == "n/a"
     assert rows[1]["agent_said"] == "n/a"
-    assert rows[1]["verdict"] == "wrong"
+    assert rows[1]["verdict"] == "no run data"
+    assert rows[1]["correct"] == "n/a"
     assert "run directory is missing" in rows[1]["notes"]
 
 
@@ -162,6 +164,7 @@ def test_cost_estimation_and_output_files(tmp_path):
     markdown = markdown_path.read_text(encoding="utf-8")
     assert "Accuracy: 1/1 (100.0%)" in markdown
     assert "fewer than 3 runs" in markdown
+    assert "Confidence calibration (by stated confidence)" in markdown
 
 
 def test_cli_writes_both_results_files(tmp_path, capsys):
@@ -221,4 +224,112 @@ def test_missing_run_artifacts_are_reported_without_crashing(tmp_path):
     )
     row = build_rows(harness_dir)[0]
     assert row["agent_said"] == "n/a"
+    assert row["verdict"] == "no run data"
     assert "run data is missing" in row["notes"]
+
+
+@pytest.mark.parametrize(
+    ("expected", "answer", "correct"),
+    [
+        ("cart", "valkey-cart", "no"),
+        ("valkey-cart", "opentelemetry-demo-valkey-cart-1", "yes"),
+        ("valkey-cart", "Valkey-Cart", "yes"),
+        ("cart", "opentelemetry-demo-cart-2", "yes"),
+        ("cart", "cart-service", "no"),
+        ("ad", "adservice", "no"),
+        ("unknown", "unknown", "n/a"),
+        ("", "n/a", "n/a"),
+    ],
+)
+def test_component_matching_rules(tmp_path, expected, answer, correct):
+    harness_dir = make_harness(tmp_path, [entry(expected=expected, component=answer)])
+    assert build_rows(harness_dir)[0]["correct"] == correct
+
+
+@pytest.mark.parametrize(("expected", "verdict"), [("unknown", "expected unknown"), ("", "expected unknown")])
+def test_unknown_expected_is_excluded_from_accuracy(tmp_path, expected, verdict):
+    entries = [entry(incident="known"), entry(incident="mystery", expected=expected, run_dir="reports/runs/other")]
+    harness_dir = make_harness(tmp_path, entries)
+    assert build_rows(harness_dir)[1]["verdict"] == verdict
+    _, markdown_path = write_results(harness_dir)
+    markdown = markdown_path.read_text(encoding="utf-8")
+    assert "Accuracy: 1/1 (100.0%)" in markdown
+    assert f"mystery ({verdict})" in markdown
+
+
+def test_entries_without_run_data_are_excluded_from_accuracy(tmp_path):
+    no_folder = {"incident": "no-folder", "expected_component": "paymentservice", "inject_verified": True,
+                 "baseline_clean": True, "run_dir": "reports/runs/not-present", "notes": ""}
+    entries = [entry(incident="ran"), no_folder]
+    _, markdown_path = write_results(make_harness(tmp_path, entries))
+    markdown = markdown_path.read_text(encoding="utf-8")
+    assert "Accuracy: 1/1 (100.0%)" in markdown
+    assert "no-folder (no run data)" in markdown
+
+
+@pytest.mark.parametrize("broken", ["candidate.json", "run_info.json", "report.json"])
+def test_malformed_run_file_does_not_abort_the_table(tmp_path, broken):
+    report = {"status": "diagnosed", "confidence": 0.9}
+    entries = [entry(incident="fine", report=report), entry(incident="broken", run_dir="reports/runs/broken", report=report)]
+    harness_dir = make_harness(tmp_path, entries)
+    (tmp_path / "reports" / "runs" / "broken" / broken).write_text("{not json", encoding="utf-8")
+    rows = build_rows(harness_dir)
+    assert rows[0]["verdict"] == "correct"
+    assert rows[1]["verdict"] == "no run data"
+    assert "invalid JSON" in rows[1]["notes"]
+    write_results(harness_dir)
+
+
+def test_shallow_or_relative_base_dir_does_not_raise(tmp_path, monkeypatch):
+    harness_dir = make_harness(tmp_path, [entry()])
+    monkeypatch.chdir(harness_dir)
+    assert build_rows(".")[0]["verdict"] == "correct"
+
+    from dev.harness import scoring
+    assert scoring._repository_root(Path("/")) is None
+    assert scoring._repository_root(Path("/a/b")) is None
+    notes = []
+    assert scoring._load_run("reports/runs/x", Path("/a"), notes) is None
+    assert "repository root" in notes[0]
+
+
+def test_confidently_wrong_uses_final_confidence_when_report_exists(tmp_path):
+    entries = [
+        entry(incident="stated-high-final-low", component="shipping", confidence=0.95,
+              report={"status": "diagnosed", "confidence": 0.4}),
+        entry(incident="stated-low-final-high", component="shipping", confidence=0.2,
+              run_dir="reports/runs/other", report={"status": "diagnosed", "confidence": 0.75}),
+    ]
+    rows = build_rows(make_harness(tmp_path, entries))
+    assert [row["verdict"] for row in rows] == ["wrong", "confidently wrong"]
+    assert [row["stated_confidence"] for row in rows] == ["0.95", "0.2"]
+    assert [row["final_confidence"] for row in rows] == ["0.4", "0.75"]
+
+
+def test_without_report_final_confidence_is_na(tmp_path):
+    row = build_rows(make_harness(tmp_path, [entry(confidence=0.6)]))[0]
+    assert row["stated_confidence"] == "0.6"
+    assert row["final_confidence"] == "n/a"
+
+
+def test_calibration_uses_stated_confidence(tmp_path):
+    entry_with_report = entry(confidence=0.2, report={"status": "diagnosed", "confidence": 0.95})
+    _, markdown_path = write_results(make_harness(tmp_path, [entry_with_report]))
+    assert "| 0-0.3 | 1 | 1 |" in markdown_path.read_text(encoding="utf-8")
+
+
+def test_four_fixture_runs_get_the_four_verdicts(tmp_path):
+    four = FIXTURE.parent / "four"
+    target = tmp_path / "reports" / "harness" / "four"
+    target.mkdir(parents=True)
+    shutil.copyfile(four / "manifest.json", target / "manifest.json")
+    shutil.copytree(four / "reports" / "runs", tmp_path / "reports" / "runs")
+    verdicts = {row["incident"]: row["verdict"] for row in build_rows(target)}
+    assert verdicts == {
+        "cache-unavailable": "correct",
+        "currency-down": "correct but escalated",
+        "payment-failure": "confidently wrong",
+        "ad-failure": "wrong escalated",
+    }
+    _, markdown_path = write_results(target)
+    assert "Accuracy: 2/4 (50.0%)" in markdown_path.read_text(encoding="utf-8")

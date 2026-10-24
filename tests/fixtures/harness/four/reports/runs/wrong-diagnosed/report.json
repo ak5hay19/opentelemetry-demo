@@ -1,0 +1,9 @@
+{
+  "status": "diagnosed",
+  "confidence": 0.8,
+  "evidence": [
+    {
+      "validated": true
+    }
+  ]
+}
