@@ -430,7 +430,7 @@ def test_investigate_prints_steps_summary_and_tokens_and_saves_the_run(tmp_path,
     assert "SYMPTOM SUMMARY" in out and "C1: 1 of 2 containers running" in out
     assert "tokens used: 2340 of 200000" in out and "DIAGNOSIS CANDIDATE (not validated)" in out
     (folder,) = list(tmp_path.iterdir())
-    assert sorted(p.name for p in folder.iterdir()) == ["candidate.json", "ledger.json", "run_info.json"]
+    assert sorted(p.name for p in folder.iterdir()) == ["candidate.json", "ledger.json", "report.json", "report.md", "run_info.json"]
     info = json.loads((folder / "run_info.json").read_text())
     assert info["trigger"] == "checkout is slow" and info["incident_id"] == folder.name
     assert json.loads((folder / "candidate.json").read_text())["component"] == "svc-b"
