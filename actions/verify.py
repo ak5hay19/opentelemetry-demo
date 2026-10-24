@@ -12,6 +12,7 @@ no_data is never treated as proof of health.
 """
 import time
 
+from actions import registry
 from tools.containers import GOOD_HEALTH, container_health
 from tools.metrics import query_metrics
 from tools.result import iso, utc_now
@@ -22,6 +23,9 @@ METRICS_WINDOW_MINUTES = 2  # the shortest window query_metrics accepts
 IGNORED_SERVICES = frozenset({"load-generator"})
 NO_ROLLBACK_NOTE = ("A restart has nothing to roll back, so if recovery is not confirmed the incident "
                     "must be escalated to a human.")
+NO_UNDO_NOTE = ("Turning the toggles off is not undone automatically, so if recovery is not confirmed the "
+                "incident must be escalated to a human.")
+DEFAULT_TIMEOUT_S = {registry.RESTART: 180, registry.DISABLE_FLAG: 300}
 
 STATES = {
     "recovered": "recovered",
@@ -55,13 +59,13 @@ def _metrics_verdict(metrics, threshold) -> tuple[dict, str]:
     return info, ("errors" if info["above_threshold"] else "ok")
 
 
-def _detail(verdict, container, container_info, metrics_info, threshold) -> str:
+def _detail(verdict, container, container_info, metrics_info, threshold, change="restart") -> str:
     if verdict == "recovered":
         return f"{container} is running and healthy; no service above {threshold}% errors"
     if verdict == "errors":
         services = ", ".join(metrics_info["above_threshold"])
         return (f"{container} is running and healthy, but {services} above {threshold}% errors: "
-                "window may still contain pre-restart errors")
+                f"window may still contain pre-{change} errors")
     if verdict == "unverified":
         return (f"{container} is running and healthy, but metrics are {metrics_info['state']}"
                 f" ({metrics_info['detail']}): recovery not confirmed by metrics")
@@ -70,9 +74,15 @@ def _detail(verdict, container, container_info, metrics_info, threshold) -> str:
     return f"{container} state could not be read: {container_info['detail']}"
 
 
-def check_recovery(proposal, *, timeout_s=180, poll_s=10, clock=time.monotonic, sleep=time.sleep,
+def default_timeout(proposal) -> int:
+    return DEFAULT_TIMEOUT_S.get(proposal.get("action_id"), DEFAULT_TIMEOUT_S[registry.RESTART])
+
+
+def check_recovery(proposal, *, timeout_s=None, poll_s=10, clock=time.monotonic, sleep=time.sleep,
                    health=container_health, metrics=query_metrics, threshold_pct=ERROR_THRESHOLD_PCT) -> dict:
-    container = proposal["params"]["container"]
+    container = registry.target_container(proposal)
+    toggled = proposal.get("action_id") == registry.DISABLE_FLAG
+    timeout_s = default_timeout(proposal) if timeout_s is None else timeout_s
     deadline = clock() + timeout_s
     checks = []
     while True:
@@ -84,7 +94,8 @@ def check_recovery(proposal, *, timeout_s=180, poll_s=10, clock=time.monotonic, 
             verdict = "recovered"
         else:
             verdict = m_verdict  # "errors" or "unverified"
-        detail = _detail(verdict, container, container_info, metrics_info, threshold_pct)
+        detail = _detail(verdict, container, container_info, metrics_info, threshold_pct,
+                         "change" if toggled else "restart")
         checks.append({"at": iso(utc_now()), "container": container_info, "metrics": metrics_info,
                        "verdict": verdict, "detail": detail})
         if verdict == "recovered" or clock() + poll_s > deadline:
@@ -96,5 +107,5 @@ def check_recovery(proposal, *, timeout_s=180, poll_s=10, clock=time.monotonic, 
         "state": state, "container": container, "detail": checks[-1]["detail"], "checks": checks,
         "timeout_s": timeout_s, "threshold_pct": threshold_pct,
         "escalate": state not in ("recovered", "recovered_unverified_metrics"),
-        "note": NO_ROLLBACK_NOTE,
+        "note": NO_UNDO_NOTE if toggled else NO_ROLLBACK_NOTE,
     }

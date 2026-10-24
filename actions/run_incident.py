@@ -2,7 +2,8 @@
 
     python -m actions.run_incident --alert "TEXT" [--execute] [--no-act]
 
-Without --execute even an approved action is only a dry run: nothing is changed. --no-act stops after the
+Without --execute even an approved action is only a dry run: nothing is changed. The two allowlisted actions
+are restart_container and disable_fault_flag (see actions/registry.py). --no-act stops after the
 proposal. The kill switch is read at every step: when it is engaged the investigation still runs (it only
 reads), but no proposal can be approved and nothing is executed.
 Exit code 0 for every handled outcome (escalation, denial, a failed or unconfirmed recovery are all recorded
@@ -31,7 +32,7 @@ def _failure(message: str) -> dict:
 def _print_proposal(proposal: dict) -> None:
     print("\nPROPOSAL")
     print(f"  action: {proposal['action_id']} {proposal['params']}  (risk {proposal['risk']})")
-    print(f"  exact command: {proposal['preview']}")
+    print(f"  {registry.ACTIONS[proposal['action_id']]['label']}: {proposal['preview']}")
 
 
 def _print_execution(result: dict) -> None:
@@ -68,7 +69,7 @@ def _taken(proposal, result) -> str:
 
 def run(alert, *, execute=False, act=True, detected_at=None, investigate_fn=investigate, input_fn=input,
         command_runner=None, health=container_health, metrics=query_metrics, clock=time.monotonic,
-        sleep=time.sleep, now=utc_now, actions_dir=None, runs_dir=RUNS_DIR) -> dict:
+        sleep=time.sleep, now=utc_now, actions_dir=None, runs_dir=RUNS_DIR, flag_path=None) -> dict:
     """Handle one alert. Returns {"exit_code", "outcome", "folder", "document"}; every dependency can be injected."""
     timeline = {"detected": detected_at or iso(now())}
     print(f"alert: {alert}")
@@ -112,10 +113,10 @@ def run(alert, *, execute=False, act=True, detected_at=None, investigate_fn=inve
             approved = approval.ask(report, proposal, input_fn=input_fn, actions_dir=actions_dir)
             if approved["decision"] == "approved":
                 result = runner.execute(proposal, dry_run=not execute, runner=command_runner, health=health,
-                                        actions_dir=actions_dir)
+                                        actions_dir=actions_dir, flag_path=flag_path)
                 _print_execution(result)
                 if result["mode"] == "executed" and result["ok"]:
-                    print(f"\nChecking recovery of {proposal['params']['container']} (read-only)...")
+                    print(f"\nChecking recovery of {registry.target_container(proposal)} (read-only)...")
                     verification = verify.check_recovery(proposal, clock=clock, sleep=sleep, health=health,
                                                          metrics=metrics)
                     _print_verification(verification)

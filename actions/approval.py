@@ -2,7 +2,7 @@
 import getpass
 import sys
 
-from actions import audit, killswitch
+from actions import audit, killswitch, registry
 from oncall import schema as S
 from tools.result import iso, utc_now
 
@@ -18,7 +18,10 @@ def _show(report: dict, proposal: dict) -> None:
     print(f"  confidence: {report.get(S.CONFIDENCE)} final (agent stated {report.get(S.STATED_CONFIDENCE)})")
     print(f"  validated evidence: {validated} of {len(evidence)}")
     print(f"  action: {proposal.get('action_id')} {proposal.get('params')}  (risk {proposal.get('risk')})")
-    print(f"  exact command: {proposal.get('preview')}")
+    flags = (proposal.get("params") or {}).get("flags")
+    if flags:
+        print(f"  toggles to set to off: {', '.join(flags)}")
+    print(f"  {registry.ACTIONS.get(proposal.get('action_id'), {}).get('label', 'exact command')}: {proposal.get('preview')}")
     print("  Nothing changes unless you answer yes.")
 
 

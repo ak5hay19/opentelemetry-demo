@@ -86,17 +86,20 @@ Solid green = built and tested. Dashed grey = planned (P6 and Day 2), not in the
 | Budgets: tool calls, tokens, repeats, LLM timeouts and malformed answers all end in a recorded partial result. | Built |
 | Validator: every cited ID must exist and every quote must match the ledger exactly. | Planned (P6) |
 | Confidence caps and escalation to a human below a threshold. | Planned (P6) |
-| Action API, dry run, kill switch and human approval before any change. | Planned (Day 2) |
+| Action API, dry run, kill switch and human approval before any change: see Hands below. | Built |
 
 ## Hands
 
 - Flow (`python -m actions.run_incident --alert TEXT`): investigate, propose one action, show it and ask a human, execute, verify, write `incident_report.md/json` into the run folder. `detector/detect.py` watches the shop and starts this flow with a generic alert text.
-- Allowlist: one action, `restart_container` (`docker start` for a stopped container, `docker restart` otherwise). The command is built from the container's current state and re-checked just before it runs. The deny list is the monitoring stack (`jaeger`, `prometheus`, `opensearch`, `otel-collector`, `grafana`, `kafka`, `frontend-proxy`) plus the flag service containers, which are refused by the sanitiser.
-- Dry run is the default: an approved action only changes something when `--execute` is given. Only an explicit "y" or "yes" approves; no terminal, EOF or any other answer is a denial. One action per incident.
+- Allowlist: two actions. The proposal depends on the diagnosed container's state, read through the read-only container tool: not running means `restart_container`; running and listed in `actions/remediations.py` means `disable_fault_flag`; anything else, or a container state that is `no_data` or `backend_error`, means no proposal and an explanation.
+  - `restart_container`: `docker start` for a stopped container, `docker restart` otherwise. The command is built from the container's current state and re-checked just before it runs. The deny list is the monitoring stack (`jaeger`, `prometheus`, `opensearch`, `otel-collector`, `grafana`, `kafka`, `frontend-proxy`) plus the flag service containers, which are refused by the sanitiser.
+  - `disable_fault_flag`: sets the catalogued fault toggles of a running component back to their resting variant, `off`. The component to toggles table is data only (`actions/remediations.py`); the restart deny list does not apply to it. The runner re-validates the proposal against the registry and the table, so a tampered toggle list is rejected. `actions/flag_adapter.py` does the write: only catalogued names, only to `off`, all checks before anything is written, then a temp file and an atomic rename. It never turns a toggle on, never touches other flags or keys, and neither returns nor logs what a toggle was before. A missing file, an unexpected structure, a toggle without an `off` variant or a toggle with a targeting rule makes it fail with nothing written.
+- Dry run is the default: an approved action only changes something when `--execute` is given. A dry run states the exact change (the command, or the toggles and the `off` value) and, for the toggle action, checks that the change would be accepted. Only an explicit "y" or "yes" approves; no terminal, EOF or any other answer is a denial. One action per incident.
 - Kill switch: the file `reports/actions/KILL` (`python -m actions.kill on|off|status`). While it exists nothing is approved or executed, and it is checked again right before the command.
 - Audit log: `reports/actions/audit.jsonl`, append-only, one JSON line per approval, dry run, execution and kill switch change.
-- Verification is read-only: the container must be running and healthy; metrics (the load generator ignored) then decide `recovered` or `recovered_unverified_metrics`. A container that never becomes healthy is `not_recovered`, and a restart has nothing to roll back, so that case goes to a human.
-- Not in v1: toggling a feature flag, Kubernetes scaling, load-generator throttling, automatic rollback.
+- Verification is read-only and the same for both actions: the container must be running and healthy; metrics (the load generator ignored) then decide `recovered` or `recovered_unverified_metrics`. A container that never becomes healthy is `not_recovered`. The default wait is 180 s after a restart and 300 s after a toggle change, and flag state is never read to verify. Neither action is rolled back automatically, so an unconfirmed recovery goes to a human.
+- Isolation: only `actions/flag_adapter.py` may reference the flag configuration or the flag service, and only `actions/runner.py` imports it. `oncall/` and `tools/` never import `actions/`, and the agent's toolbox has no action or flag tool (all tested).
+- Not built: Kubernetes scaling, load-generator throttling, automatic rollback.
 
 ## Known limits
 

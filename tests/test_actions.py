@@ -61,16 +61,19 @@ def test_propose_builds_the_exact_command(proposal):
     assert proposal["risk"] == "low" and proposal["action_id"] == "restart_container"
 
 
-def test_running_container_gets_restart():
-    health = fake_health(row("cart", "running", "healthy"))
+def test_a_restarting_container_gets_restart():
+    health = fake_health(row("cart", "restarting", "none"))
     assert registry.propose(report("cart"), health)["preview"] == "docker restart cart"
 
 
 @pytest.mark.parametrize("name", sorted(registry.DENY) + ["flagd", "flagd-ui"])
-def test_every_deny_list_name_is_rejected(name):
-    health = fake_health(row(name, "running"))
-    assert registry.propose(report(name), health) is None
-    assert "not an allowed" in registry.explain_no_proposal(report(name), health)
+@pytest.mark.parametrize("status", ["running", "exited"])
+def test_every_deny_list_name_is_never_restarted(name, status):
+    health = fake_health(row(name, status))
+    proposal = registry.propose(report(name), health)
+    assert proposal is None or proposal["action_id"] == "disable_fault_flag"
+    if proposal is None:
+        assert "not an allowed" in registry.explain_no_proposal(report(name), health)
     fake = {"incident_id": "i", "action_id": "restart_container", "params": {"container": name}, "preview": f"docker restart {name}"}
     assert registry.validate(fake, health)[0] is None
 
@@ -84,8 +87,8 @@ def test_no_proposal_when_escalated_or_not_allowed_or_unknown():
     assert "unavailable" in registry.explain_no_proposal(report(), broken_health)
 
 
-def test_toggle_flag_is_disabled():
-    assert registry.ACTIONS["toggle_flag"]["enabled"] is False
+def test_the_old_toggle_placeholder_is_gone():
+    assert set(registry.ACTIONS) == {"restart_container", "disable_fault_flag"}
     fake = {"incident_id": "i", "action_id": "toggle_flag", "params": {}, "preview": ""}
     assert registry.validate(fake, HEALTH)[0] is None
 
@@ -302,8 +305,10 @@ def test_verify_ignores_the_load_generator(proposal):
     assert run_check(proposal, UP, only_loadgen)["state"] == "recovered"
 
 
-def test_verify_default_timeout_is_180_seconds():
-    assert inspect.signature(verify.check_recovery).parameters["timeout_s"].default == 180
+def test_verify_default_timeout_depends_on_the_action(proposal):
+    assert inspect.signature(verify.check_recovery).parameters["timeout_s"].default is None
+    assert verify.default_timeout(proposal) == 180
+    assert verify.default_timeout({"action_id": "disable_fault_flag"}) == 300
 
 
 def test_verify_recovers_after_a_few_polls(proposal):
@@ -390,8 +395,6 @@ def test_agent_side_never_imports_actions():
     assert found == []
 
 
-def test_actions_never_import_dev_and_name_no_flag_service():
+def test_actions_never_import_dev():
     for path in sorted((REPO / "actions").glob("*.py")):
         assert "dev" not in imported_roots(path), path
-        text = path.read_text(encoding="utf-8").lower()
-        assert "flagd" not in text and "/feature" not in text, path
