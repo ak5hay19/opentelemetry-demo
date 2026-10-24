@@ -1,5 +1,6 @@
 """The approval gate: only an exact 'yes' on a still-valid proposal approves, and the decision is bound to that proposal."""
 import json
+import os
 
 import pytest
 
@@ -76,6 +77,7 @@ def test_cli_defaults_to_the_newest_run_with_a_proposal(tmp_path):
     for name in ("inc-old", "inc-new"):
         (tmp_path / name).mkdir()
         (tmp_path / name / "proposal.json").write_text(json.dumps(proposed()), encoding="utf-8")
+    os.utime(tmp_path / "inc-old" / "proposal.json", (1, 1))  # files written back to back can share a timestamp
     approve.main([], ask=answering("no"), runs_dir=tmp_path)
     assert (tmp_path / "inc-new" / "decision.json").exists()
     assert not (tmp_path / "inc-old" / "decision.json").exists()
