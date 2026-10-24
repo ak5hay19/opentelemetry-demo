@@ -1,7 +1,7 @@
 """The allowlist of actions the agent may propose, and the check every proposal must pass.
 
-One real action: restart_container. The command is always derived here from the container's current
-state, never taken from the caller.
+Enabled actions are explicitly allowlisted here. Commands are always derived from validated action
+parameters and current container state, never taken from caller-supplied command text.
 """
 import re
 
@@ -17,9 +17,13 @@ DENY = frozenset({
 
 CONTAINER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 RESTART = "restart_container"
+FLUSH_CACHE = "flush_cache"
+FLUSH_CACHE_CONTAINER = "valkey-cart"
+FLUSH_CACHE_COMMAND = ["docker", "exec", FLUSH_CACHE_CONTAINER, "valkey-cli", "FLUSHDB", "ASYNC"]
 
 ACTIONS = {
     RESTART: {"enabled": True, "params": ("container",), "risk": "low"},
+    FLUSH_CACHE: {"enabled": True, "params": ("container", "scope"), "risk": "high"},
     # not implemented in v1; pending the organisers' Action API spec
     "toggle_flag": {"enabled": False},
 }
@@ -62,6 +66,18 @@ def validate(proposal, health=container_health) -> tuple[list[str] | None, str]:
     params = proposal.get("params")
     if not isinstance(params, dict) or set(params) != set(action["params"]):
         return None, "proposal params do not match the action"
+    if proposal["action_id"] == FLUSH_CACHE:
+        if params != {"container": FLUSH_CACHE_CONTAINER, "scope": "database"}:
+            return None, "flush-cache is restricted to the valkey-cart database"
+        row, why = find_container(FLUSH_CACHE_CONTAINER, health)
+        if row is None or row["name"] != FLUSH_CACHE_CONTAINER:
+            return None, why or f"{FLUSH_CACHE_CONTAINER} is not an allowed cache target"
+        if row.get("status") != "running" or row.get("health") != "healthy":
+            return None, f"{FLUSH_CACHE_CONTAINER} must be running and healthy"
+        command = list(FLUSH_CACHE_COMMAND)
+        if proposal.get("preview") != " ".join(command):
+            return None, "flush-cache preview does not match the fixed allowlisted command"
+        return command, ""
     row, why = find_container(params["container"], health)
     if row is None or row["name"] != params["container"]:
         return None, why or f"{params['container']} is not a container name"
